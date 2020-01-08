@@ -1,4 +1,5 @@
 
+#include <set>
 #include <iostream>
 #include <filesystem>
 #include <boost/bind.hpp>
@@ -47,7 +48,30 @@ enum struct comstate {
     receiving
 };
 
+using tstamp = std::chrono::time_point<std::chrono::system_clock>;
+using tstamped_temp = std::pair<float, tstamp>;
 
+struct thermostat_actual_values
+{
+    tstamped_temp set;
+    tstamped_temp current;
+    unsigned valve; // 0 - 100
+
+    void set_set(float f)
+    {
+        set.first = f;
+        set.second = std::chrono::system_clock::now();
+    }
+    void set_current(float f)
+    {
+        current.first = f;
+        current.second = std::chrono::system_clock::now();
+    }
+    void set_valve(unsigned v)
+    {
+        valve = v;
+    }
+};
 
 struct ncube::Private
 {
@@ -67,6 +91,8 @@ struct ncube::Private
     config cdata;
     // workdata
     std::thread thrd;    
+    std::map<rfaddr, thermostat_actual_values> thermostats;
+    std::set<rfaddr> wallthermostats;
 
     Private(std::shared_ptr<ba::io_service> io)
         : ios(io)
@@ -91,12 +117,35 @@ ncube::ncube(std::string port, const config &conf, std::shared_ptr<boost::asio::
 {
     _p = std::make_shared<Private>(ios);
     _p->port = port;
-    _p->cdata = conf;
+    _p->cdata = conf;    
     start();
+}
+
+void ncube::setup_workdata()
+{
+    for (const config::value_type &n: _p->cdata)
+    {
+        for (auto cit = n.second.thermostats.begin(); cit != n.second.thermostats.end(); ++cit)
+            _p->thermostats[cit->first] = thermostat_actual_values();
+
+        if (n.second.wallthermostat)
+            _p->wallthermostats.insert(n.second.wallthermostat);
+    }
+}
+
+bool ncube::is_thermostat(rfaddr rf) const
+{
+    return (_p->thermostats.find(rf) != _p->thermostats.end());
+}
+
+bool ncube::is_wallthermostat(rfaddr rf) const
+{
+    return (_p->wallthermostats.find(rf) != _p->wallthermostats.end());
 }
 
 void ncube::start()
 {
+    setup_workdata();
     _p->ios->post([this](){
         process_event(event_t(event_e::Start, std::monostate()));
     });
@@ -388,11 +437,53 @@ void ncube::process_data(const std::string &datain)
     unsigned src = uvalue(pData+9, 6);
     unsigned dst = uvalue(pData+15, 6);
     std::string payload = std::string(pData+21, pData+21+len*2-8);
+
+    switch (static_cast<cmds>(mt))
+    {
+        case cmds::Ack:
+            if (is_thermostat(src))
+            {
+                uint8_t roomid = uvalue(pData+21, 2);
+                uint8_t state = uvalue(pData+23, 2);
+                uint8_t flags = uvalue(pData+25, 2);
+                uint8_t valve = uvalue(pData+27, 2);
+                uint8_t desired = uvalue(pData+29, 2);
+                L_Info << "Ack rsp state:" << uint16_t(state)
+                       << " valve:" << uint16_t(valve)
+                       << " desired:" << float(desired/2.0);
+            }
+            else
+                L_Err << "src " << src << "not a thermostat";
+            break;
+        case cmds::ThermostatState:
+            if (is_thermostat(src))
+            {
+                uint8_t roomid = uvalue(pData+21, 2);
+                uint8_t flags = uvalue(pData+23, 2);
+                uint8_t valve = uvalue(pData+25, 2);
+                uint8_t desired = uvalue(pData+27, 2);
+                uint8_t until1 = uvalue(pData+29, 2);
+                uint8_t until2 = uvalue(pData+31, 2);
+
+                L_Info << "TState :" << uint16_t(roomid)
+                       << " flags:" << std::hex << uint16_t(flags) << std::dec
+                       << " valve:" << uint16_t(valve)
+                       << " desired:" << float(desired/2.0);
+
+            }
+            break;
+        default:
+            L_Err << "unknown cmd 0x" << std::hex << std::setw(2) << std::setfill('0') << mt << std::dec;
+            break;
+    }
+
+
     L_Info << "MT " << std::hex << mt << ' '
            << " s(" << devinfo(src)
            << ") d(" << devinfo(dst)
            << ") pl " << payload
            << std::endl;
+
 #if 0
 
 

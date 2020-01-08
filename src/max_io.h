@@ -65,6 +65,10 @@ private:
     void start_packet_read();
     std::string get_received();
 
+    void setup_workdata();
+    bool is_thermostat(rfaddr rf) const;
+    bool is_wallthermostat(rfaddr rf) const;
+
     std::string devinfo(rfaddr a);
 
     void sync_enable_moritz();
