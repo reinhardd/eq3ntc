@@ -88,7 +88,7 @@ private:
     void process_event(const event_t &);
 
 
-    void process_data(const std::string &datain);
+    void process_data(std::string &&datain);
 private:
     struct Private;
     std::shared_ptr<Private> _p;

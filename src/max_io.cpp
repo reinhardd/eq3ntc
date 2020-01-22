@@ -400,8 +400,10 @@ void ncube::process_event(const max_io::event_t &evt)
             break;
         case event_e::GotPacket:
             {
-                const std::string &data = std::get<std::string>(evt.second);
-                process_data(data);
+                std::string data = std::get<std::string>(evt.second);
+                data.pop_back(); // remove cr
+                data.pop_back(); // remove lf
+                process_data(std::move(data));
             }
             break;
         case event_e::VersionTimeout:
@@ -415,11 +417,24 @@ void ncube::process_event(const max_io::event_t &evt)
     }
 }
 
-void ncube::process_data(const std::string &datain)
+std::string temp_end2_string(uint32_t endt)
+{
+    unsigned month = ((endt >> 20) & 0xe) + (endt & 0x8000 ? 1 : 0);
+    unsigned day = (endt >> 15) & 0x1f;
+    unsigned year = 2000 +((endt >> 8) & 0x3f);
+    unsigned hour = (endt & 0x3f) / 2;
+    unsigned min = (endt & 0x3f) % 2 ? 30 : 0;
+    std::ostringstream aux;
+    aux << day << '.' << month << '.' << year
+        << ' ' << hour << ':' << min;
+    return aux.str();
+}
+
+void ncube::process_data(std::string &&datain)
 {
     if (datain.size() < 21)
         L_Err << "invalid msg: " << datain;
-    L_Info << "got packet " << datain;
+    L_Info << "got packet sz " << datain.size() << " : " << datain;
 
     // 12345678901234567890123456789012345
     // Z0F 00  04   60  1AF6DD 000000 00 18 00 0C 00 CD F8
@@ -448,9 +463,28 @@ void ncube::process_data(const std::string &datain)
                 uint8_t flags = uvalue(pData+25, 2);
                 uint8_t valve = uvalue(pData+27, 2);
                 uint8_t desired = uvalue(pData+29, 2);
+                std::ostringstream aux;
+                if (datain.size() > 33)
+                {
+                    uint32_t endt = uvalue(pData+31, 6);
+                    aux << temp_end2_string(endt);
+#if 0
+                    // 1000 0000 0000 0000 = 0x8000
+                    unsigned month = ((endt >> 20) & 0xe) + (endt & 0x8000 ? 1 : 0);
+                    unsigned day = (endt >> 15) & 0x1f;
+                    unsigned year = 2000 +((endt >> 8) & 0x3f);
+                    unsigned hour = (endt & 0x3f) / 2;
+                    unsigned min = (endt & 0x3f) % 2 ? 30 : 0;
+                    aux << " temp end " << day << '.' << month << '.' << year
+                        << ' ' << hour << ':' << min;
+#endif
+                }
                 L_Info << "Ack rsp state:" << uint16_t(state)
+                       << " mode:" << int(flags & 3)
                        << " valve:" << uint16_t(valve)
-                       << " desired:" << float(desired/2.0);
+                       << " desired:" << float(desired/2.0)
+                       << aux.str();
+
             }
             else
                 L_Err << "src " << src << "not a thermostat";
@@ -458,17 +492,117 @@ void ncube::process_data(const std::string &datain)
         case cmds::ThermostatState:
             if (is_thermostat(src))
             {
-                uint8_t roomid = uvalue(pData+21, 2);
-                uint8_t flags = uvalue(pData+23, 2);
-                uint8_t valve = uvalue(pData+25, 2);
-                uint8_t desired = uvalue(pData+27, 2);
-                uint8_t until1 = uvalue(pData+29, 2);
-                uint8_t until2 = uvalue(pData+31, 2);
+                uint8_t roomid = static_cast<uint8_t>(uvalue(pData+21, 2));
+                uint8_t flags = static_cast<uint8_t>(uvalue(pData+23, 2));
+                uint8_t valve = static_cast<uint8_t>(uvalue(pData+25, 2));
+                uint8_t desired = static_cast<uint8_t>(uvalue(pData+27, 2));
+                uint8_t until1 = static_cast<uint8_t>(uvalue(pData+29, 2));
+                uint8_t until2 = static_cast<uint8_t>(uvalue(pData+31, 2));
 
                 L_Info << "TState :" << uint16_t(roomid)
                        << " flags:" << std::hex << uint16_t(flags) << std::dec
                        << " valve:" << uint16_t(valve)
                        << " desired:" << float(desired/2.0);
+
+            }
+            break;
+        case cmds::SetTemperature:
+            {
+#if 0
+                [2020-01-22 21:05:27.326364] [0x00007fe58e4a9700] [info]    got packet Z0B73054017068D1A9CA701285B
+                [2020-01-22 21:05:27.326403] [0x00007fe58e4a9700] [info]    set mode and temp: 0 0.5°C
+                [2020-01-22 21:05:27.326448] [0x00007fe58e4a9700] [info]    MT 40  s(Cube:WT) d(Wohnzimmer:Erker rechts) pl 01285B
+
+                  01285B
+                  01 room
+                  28 mode + temp    0x28 & 0x7f => 0x28 => 40 / 2 => 20 °C
+                  5B
+                  5B => 91
+
+                  // with vacation to 31.1.2020 18:00
+                  [2020-01-22 22:09:11.998688] [0x00007f2a4ad78700] [trace]   process_event 2
+                  [2020-01-22 22:09:11.998715] [0x00007f2a4ad78700] [info]    got packet sz 33 : Z0E8E054017068D1AF58705891F942459
+                  [2020-01-22 22:09:11.998767] [0x00007f2a4ad78700] [info]    set room: 5 mode: 2 temp: 4.5vacation temp 15.5 temp end  temp end 8.8.2036 12:30
+                  [2020-01-22 22:09:11.998822] [0x00007f2a4ad78700] [info]    MT 40  s(Cube:WT) d(ELW Schlafzimmer:ELW Schlafzimmer) pl 05891F942459
+
+                  Z0E8E0540 17068D 1AF587 05891F942459
+                  05    room
+                  89    cb mode(89 >> 6 => 2 =>vac)  desired(89 & 7f => 9 9 / 2 => 4.5)
+                  1F942459
+
+                  Mode 1 Manual
+                  [2020-01-22 22:19:40.912969] [0x00007f8dbad42700] [info]    got packet sz 27 : Z0B8F05 40 17068D 1AF587 05495C
+                  [2020-01-22 22:19:40.913001] [0x00007f8dbad42700] [info]    set room: 5 mode: 1
+                  [2020-01-22 22:19:40.913067] [0x00007f8dbad42700] [info]    MT 40  s(Cube:WT) d(ELW Schlafzimmer:ELW Schlafzimmer) pl 05495C
+
+                  05  room
+                  49  cd Mode(49 >> 6 => 1 =>manual) desired(49&3f => 9 /2.0 => 4.5)
+                  5C
+
+
+#endif
+                uint8_t room = static_cast<uint8_t>(uvalue(pData+21, 2));
+                uint8_t cb = static_cast<uint8_t>(uvalue(pData+23, 2));
+                unsigned mode = (cb >> 6);
+                float desired = (cb & 0x3f) / 2.0;
+
+                std::ostringstream xs;
+                if (mode == 2) // vacation
+                {
+                    uint32_t temp_end = static_cast<uint32_t>(uvalue(pData+27, 6));
+                    // until decoding not right here
+                    xs << " vacation " << desired << "°C until " << temp_end2_string(temp_end);
+                }
+                else if (mode == 1)
+                {
+                    switch(cb)
+                    {
+                        case 0x41:
+                            xs << " manual eco";
+                            break;
+                        case 0x42:
+                            xs << " manual comfort";
+                            break;
+                        case 0x43:
+                            xs << " manual window open";
+                            break;
+                        default:
+                            xs << " manual " << desired << "°C";
+                            break;
+                    }
+                }
+
+                L_Info << "set room: " << uint16_t(room)
+                       << " mode: " << unsigned(mode)
+                       << xs.str();
+            }
+            break;
+        case cmds::WallThermostatState:
+            if (is_wallthermostat(src))
+            {
+
+            }
+            break;
+        case cmds::WallThermostatControl:
+            {
+                uint8_t misc = static_cast<uint8_t>(uvalue(pData+21, 2));
+                uint8_t desired_raw = static_cast<uint8_t>(uvalue(pData+23, 2));
+                uint8_t measured_raw = static_cast<uint8_t>(uvalue(pData+25, 2));
+#if 0
+                wt ctrl desired:0 measured:4.1
+                MT 42  s(Wohnzimmer:WT) d(Wohnzimmer:Spitzerker links) pl 0029D31B
+                0029D31B
+                  desired_raw 0x29 b00101001
+                  desired 0x29 & 0x27 => 0x29 => 41 / 2.0 => 20,1
+
+
+
+#endif
+
+                float desired = (desired_raw & 0x7F) / 2.0;
+                float measured = ((uint16_t(desired_raw & 0x80) << 1) + measured_raw) / 10.0 ;
+
+                L_Info << "wt ctrl desired:" << desired << " measured:" << measured;
 
             }
             break;
