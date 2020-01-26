@@ -637,6 +637,7 @@ void ncube::process_data(std::string &&datain)
 
                 L_Info << "set room: " << uint16_t(room)
                        << " mode: " << unsigned(mode)
+                       << " desired: " << desired
                        << xs.str();
             }
             break;
@@ -788,6 +789,17 @@ void ncube::update_wallthermostat(rfaddr src, float desired, float measured)
 
     if (set_measured_desired(ts, desired, measured))
         emit_update();
+}
+
+bool ncube::set_mode_desired(thermostat_state &ts, opmode mode, float desired)
+{
+    bool update = ((ts.mode != mode) || (ts.desired != desired));
+    if (update)
+    {
+        ts.desired = desired;
+        ts.mode = mode;
+    }
+    return update;
 }
 
 bool ncube::set_measured_desired(thermostat_state &ts, float desired, float measured)

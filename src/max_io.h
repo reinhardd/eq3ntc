@@ -165,6 +165,7 @@ private:
 
     bool set_valve_desired(thermostat_state &, uint16_t valve, float desired);
     bool set_measured_desired(thermostat_state &, float desired, float measured);
+    bool set_mode_desired(thermostat_state &, opmode mode, float measured);
 
 private:
     struct Private;
