@@ -503,8 +503,11 @@ std::string temp_end2_string(uint32_t endt)
 
 void ncube::process_data(std::string &&datain)
 {
-    if (datain.size() < 21)
+    std::size_t dsz = datain.size();
+    if (dsz < 21)
         L_Err << "invalid msg: " << datain;
+
+    // uint8_t possibly_rssi = uvalue(datain.end()-2, 2);
     L_Info << "got packet sz " << datain.size() << " : " << datain;
 
     // 12345678901234567890123456789012345
@@ -514,14 +517,37 @@ void ncube::process_data(std::string &&datain)
     // 0f * 2 => 30 +
 
     // datain.erase(datain.size()-2);
+
+
+
     const char *pData = datain.c_str();
     unsigned len = uvalue(pData+1, 2);
-    unsigned cnt = uvalue(pData+3, 2);
-    unsigned flag = uvalue(pData+5, 2);
-    unsigned mt = uvalue(pData+7, 2);
+    L_Info << "len " << len << " sz " << datain.size();
+    uint8_t rssi = 0;
+    bool with_rssi = (dsz == (len * 2 + 5));
+    if (with_rssi)
+    {
+        rssi = uvalue(pData+dsz-2, 2);
+        datain.pop_back();
+        datain.pop_back();
+        dsz = datain.size();
+    }
 
-    unsigned src = uvalue(pData+9, 6);
-    unsigned dst = uvalue(pData+15, 6);
+    auto getdata = [&pData, &dsz](uint8_t ofs, unsigned len) {
+        if (len >= dsz)
+        {
+            L_Err << "invalid access to ofs " << ofs << " max " << dsz;
+            return 0u;
+        }
+        return uvalue(pData + ofs, len);
+    };
+
+    unsigned cnt = getdata(3, 2); // uvalue(pData+3, 2);
+    uint8_t flag = getdata(5, 2);
+    unsigned mt = getdata(7, 2);
+
+    unsigned src = getdata(9, 6);
+    unsigned dst = getdata(15, 6);
     std::string payload = std::string(pData+21, pData+21+len*2-8);
 
     switch (static_cast<cmds>(mt))
@@ -529,15 +555,15 @@ void ncube::process_data(std::string &&datain)
         case cmds::Ack:
             if (is_thermostat(src))
             {
-                uint8_t roomid = uvalue(pData+21, 2);
-                uint8_t state = uvalue(pData+23, 2);
-                uint8_t flags = uvalue(pData+25, 2);
-                uint8_t valve = uvalue(pData+27, 2);
-                uint8_t desired = uvalue(pData+29, 2);
+                uint8_t roomid = getdata(21, 2);
+                uint8_t state = getdata(23, 2);
+                uint8_t flags = getdata(25, 2);
+                uint8_t valve = getdata(27, 2);
+                uint8_t desired = getdata(29, 2);
                 std::ostringstream aux;
                 if (datain.size() > 33)
                 {
-                    uint32_t endt = uvalue(pData+31, 6);
+                    uint32_t endt = getdata(31, 6);
                     aux << temp_end2_string(endt);
                 }
                 L_Info << "Ack rsp state:" << uint16_t(state)
@@ -554,12 +580,12 @@ void ncube::process_data(std::string &&datain)
         case cmds::ThermostatState:
             if (is_thermostat(src))
             {
-                uint8_t roomid = static_cast<uint8_t>(uvalue(pData+21, 2));
-                uint8_t flags = static_cast<uint8_t>(uvalue(pData+23, 2));
-                uint8_t valve = static_cast<uint8_t>(uvalue(pData+25, 2));
-                uint8_t desired = static_cast<uint8_t>(uvalue(pData+27, 2));
-                uint8_t until1 = static_cast<uint8_t>(uvalue(pData+29, 2));
-                uint8_t until2 = static_cast<uint8_t>(uvalue(pData+31, 2));
+                uint8_t roomid = static_cast<uint8_t>(getdata(21, 2));
+                uint8_t flags = static_cast<uint8_t>(getdata(23, 2));
+                uint8_t valve = static_cast<uint8_t>(getdata(25, 2));
+                uint8_t desired = static_cast<uint8_t>(getdata(27, 2));
+                uint8_t until1 = static_cast<uint8_t>(getdata(29, 2));
+                uint8_t until2 = static_cast<uint8_t>(getdata(31, 2));
 
                 L_Info << "TState :" << uint16_t(roomid)
                        << " flags:" << std::hex << uint16_t(flags) << std::dec
@@ -604,15 +630,15 @@ void ncube::process_data(std::string &&datain)
 
 
 #endif
-                uint8_t room = static_cast<uint8_t>(uvalue(pData+21, 2));
-                uint8_t cb = static_cast<uint8_t>(uvalue(pData+23, 2));
+                uint8_t room = static_cast<uint8_t>(getdata(21, 2));
+                uint8_t cb = static_cast<uint8_t>(getdata(23, 2));
                 unsigned mode = (cb >> 6);
                 float desired = (cb & 0x3f) / 2.0;
 
                 std::ostringstream xs;
                 if (mode == 2) // vacation
                 {
-                    uint32_t temp_end = static_cast<uint32_t>(uvalue(pData+27, 6));
+                    uint32_t temp_end = static_cast<uint32_t>(getdata(27, 6));
                     // until decoding not right here
                     xs << " vacation " << desired << "°C until " << temp_end2_string(temp_end);
                 }
@@ -649,9 +675,9 @@ void ncube::process_data(std::string &&datain)
             break;
         case cmds::WallThermostatControl:
             {
-                uint8_t misc = static_cast<uint8_t>(uvalue(pData+21, 2));
-                uint8_t desired_raw = static_cast<uint8_t>(uvalue(pData+23, 2));
-                uint8_t measured_raw = static_cast<uint8_t>(uvalue(pData+25, 2));
+                uint8_t misc = static_cast<uint8_t>(getdata(21, 2));
+                uint8_t desired_raw = static_cast<uint8_t>(getdata(23, 2));
+                uint8_t measured_raw = static_cast<uint8_t>(getdata(25, 2));
 #if 0
                 wt ctrl desired:0 measured:4.1
                 MT 42  s(Wohnzimmer:WT) d(Wohnzimmer:Spitzerker links) pl 0029D31B
@@ -677,13 +703,17 @@ void ncube::process_data(std::string &&datain)
             break;
     }
 
+    std::ostringstream rssiinfo;
+    if (with_rssi)
+        rssiinfo << ") rssi(" << uint16_t(rssi);
 
     L_Info << "MT " << std::hex << mt << ' '
-           << " s(" << devinfo(src)
+           << " cnt(" << std::dec << uint16_t(cnt)
+           << ") s(" << devinfo(src)
            << ") d(" << devinfo(dst)
            << ") flags(" << flags_to_string(flag)
-           << ") pl " << payload
-           << std::endl;
+           << rssiinfo.str()
+           << ") pl(" << payload << ")";
 
 #if 0
 
