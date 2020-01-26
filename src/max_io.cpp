@@ -12,6 +12,14 @@ namespace ba = boost::asio;
 
 namespace max_io {
 
+enum struct event_e {
+    Start,
+    GotVersion,
+    GotPacket,
+    RxError,
+    VersionTimeout,
+};
+
 namespace {
 const char *delimiter = "\r\n";
 
@@ -40,7 +48,49 @@ enum struct cmds:uint8_t {
     WakeUp                      = 0xf1
 };
 
+std::string flags_to_string(uint8_t f)
+{
+    std::ostringstream xs;
+    xs << std::hex << std::setfill('0') << std::setw(2) << uint16_t(f);
+    return xs.str();
+}
 
+std::string devflags_to_string(uint8_t f)
+{
+    std::ostringstream xs;
+    xs << std::hex << std::setfill('0') << std::setw(2) << uint16_t(f);
+    xs << "|M:" << (f & 3) << ";"
+       << ";DST:" << std::boolalpha << (f & 8)
+       << ";LNK:" << std::boolalpha << (f & 0x10)
+       << ";PLCK:" << std::boolalpha << (f & 0x20)
+       << ";RFERR:" << std::boolalpha << (f & 0x40)
+       << ";BATLOW:" << std::boolalpha << (f & 0x80)
+       << ";";
+    return xs.str();
+}
+
+}
+
+std::ostream &operator<<(std::ostream &s, const opmode &m)
+{
+    std::ostringstream xs;
+    switch (m)
+    {
+        case opmode::automatic:
+            xs << "auto";
+            break;
+        case opmode::manual:
+            xs << "manual";
+            break;
+        case opmode::boost:
+            xs << "boost";
+            break;
+        case opmode::temporary:
+            xs << "temp";
+            break;
+    }
+    s << xs.str();
+    return s;
 }
 
 enum struct comstate {
@@ -48,6 +98,7 @@ enum struct comstate {
     receiving
 };
 
+#if 0
 using tstamp = std::chrono::time_point<std::chrono::system_clock>;
 using tstamped_temp = std::pair<float, tstamp>;
 
@@ -72,6 +123,9 @@ struct thermostat_actual_values
         valve = v;
     }
 };
+#endif
+
+
 
 struct ncube::Private
 {
@@ -91,33 +145,40 @@ struct ncube::Private
     config cdata;
     // workdata
     std::thread thrd;    
-    std::map<rfaddr, thermostat_actual_values> thermostats;
-    std::set<rfaddr> wallthermostats;
+    // std::map<rfaddr, thermostat_actual_values> thermostats;
+    std::map<rfaddr, thermostat_state> thermostats;
+    std::map<rfaddr, thermostat_state> wallthermostats;
 
-    Private(std::shared_ptr<ba::io_service> io)
+
+    std::map<rfaddr, room_id> room_map;
+
+    callback cb;
+
+    Private(std::shared_ptr<ba::io_service> io, callback &ncb)
         : ios(io)
         , sio(*(ios.get()))
         , work(*(ios.get()))
         , versionto(*(ios.get()))
+        , cb(ncb)
     {
         L_Dbg << "ios " << ios.get();
     }
 };
 
-ncube::ncube(std::string port, const config &conf)
+ncube::ncube(std::string port, const config &conf, callback cb)
 {
     L_Trace << "ncube on port " << port  << std::endl;
-    _p = std::make_shared<Private>(std::make_shared<ba::io_service>());
+    _p = std::make_shared<Private>(std::make_shared<ba::io_service>(), cb);
     _p->cdata = conf;
     _p->port = port;
     start();
 }
 
-ncube::ncube(std::string port, const config &conf, std::shared_ptr<boost::asio::io_service> ios)
+ncube::ncube(std::string port, const config &conf, std::shared_ptr<boost::asio::io_service> ios, callback cb)
 {
-    _p = std::make_shared<Private>(ios);
+    _p = std::make_shared<Private>(ios, cb);
     _p->port = port;
-    _p->cdata = conf;    
+    _p->cdata = conf;
     start();
 }
 
@@ -125,11 +186,21 @@ void ncube::setup_workdata()
 {
     for (const config::value_type &n: _p->cdata)
     {
+        room_id roomno = n.first;
+        const room_config &rc = n.second;
         for (auto cit = n.second.thermostats.begin(); cit != n.second.thermostats.end(); ++cit)
-            _p->thermostats[cit->first] = thermostat_actual_values();
+        {
+            _p->thermostats.emplace(std::pair(cit->first, thermostat_state(cit->second)));
+            _p->room_map[cit->first] = roomno;
+            L_Info << "added " << cit->second << " to " << roomno << ':' << rc.name;
+        }
 
-        if (n.second.wallthermostat)
-            _p->wallthermostats.insert(n.second.wallthermostat);
+        if (rc.wallthermostat)
+        {
+            _p->wallthermostats.emplace(std::pair(rc.wallthermostat, thermostat_state("wt")));
+            _p->room_map[n.second.wallthermostat] = n.first;
+            L_Info << "added wt to " << roomno << ':' << rc.name;
+        }
     }
 }
 
@@ -374,7 +445,7 @@ unsigned uvalue(const char *pD, unsigned len)
 
 void ncube::process_event(const max_io::event_t &evt)
 {
-    L_Trace << "process_event " << static_cast<int>(evt.first);
+    // L_Trace << "process_event " << static_cast<int>(evt.first);
     switch (evt.first)
     {
         case event_e::Start:
@@ -468,23 +539,14 @@ void ncube::process_data(std::string &&datain)
                 {
                     uint32_t endt = uvalue(pData+31, 6);
                     aux << temp_end2_string(endt);
-#if 0
-                    // 1000 0000 0000 0000 = 0x8000
-                    unsigned month = ((endt >> 20) & 0xe) + (endt & 0x8000 ? 1 : 0);
-                    unsigned day = (endt >> 15) & 0x1f;
-                    unsigned year = 2000 +((endt >> 8) & 0x3f);
-                    unsigned hour = (endt & 0x3f) / 2;
-                    unsigned min = (endt & 0x3f) % 2 ? 30 : 0;
-                    aux << " temp end " << day << '.' << month << '.' << year
-                        << ' ' << hour << ':' << min;
-#endif
                 }
                 L_Info << "Ack rsp state:" << uint16_t(state)
                        << " mode:" << int(flags & 3)
                        << " valve:" << uint16_t(valve)
                        << " desired:" << float(desired/2.0)
+                       << " flags:" << devflags_to_string(flags)
                        << aux.str();
-
+                update_thermostat(src, valve, float(desired/2.0));
             }
             else
                 L_Err << "src " << src << "not a thermostat";
@@ -503,6 +565,7 @@ void ncube::process_data(std::string &&datain)
                        << " flags:" << std::hex << uint16_t(flags) << std::dec
                        << " valve:" << uint16_t(valve)
                        << " desired:" << float(desired/2.0);
+                update_thermostat(src, valve, float(desired/2.0));
 
             }
             break;
@@ -604,6 +667,8 @@ void ncube::process_data(std::string &&datain)
 
                 L_Info << "wt ctrl desired:" << desired << " measured:" << measured;
 
+                update_wallthermostat(src, desired, measured);
+
             }
             break;
         default:
@@ -615,6 +680,7 @@ void ncube::process_data(std::string &&datain)
     L_Info << "MT " << std::hex << mt << ' '
            << " s(" << devinfo(src)
            << ") d(" << devinfo(dst)
+           << ") flags(" << flags_to_string(flag)
            << ") pl " << payload
            << std::endl;
 
@@ -638,6 +704,175 @@ void ncube::process_data(std::string &&datain)
 
 #endif
 
+}
+
+thermostat_state::thermostat_state(std::string name)
+    : name(name)
+{}
+
+bool thermostat_state::operator!=(const thermostat_state &ts)
+{
+    return (
+        (desired != ts.desired) ||
+        (measured != ts.measured) ||
+        (mode != ts.mode) ||
+        (dst_active != ts.dst_active) ||
+        (panel_locked != ts.panel_locked) ||
+        (rf_err != ts.rf_err) ||
+        (link_valid != ts.link_valid) ||
+        (battery_ok != ts.battery_ok) ||        
+        (name != ts.name));
+}
+
+bool ncube::room_from_rfaddr(rfaddr src, unsigned &roomnr)
+{
+    unsigned roomno = 0;
+    auto cit = _p->room_map.find(src);
+    if (cit != _p->room_map.end())
+    {
+        roomno = cit->second;
+    }
+    roomnr = roomno;
+    return (roomnr != 0);
+};
+
+void ncube::update_thermostat(rfaddr src, uint16_t valve, float desired)
+{
+#if 0
+    unsigned roomno = 0;
+    auto cit = _p->room_map.find(src);
+    if (cit != _p->room_map.end())
+    {
+        roomno = cit->second;
+    }
+#endif
+    unsigned roomno;
+    if (!room_from_rfaddr(src, roomno))    // if (roomno == 0)
+    {
+        L_Err << "no room found for rfaddr 0x" << std::hex << std::setw(6)
+              << std::setfill('0') << src;
+        return;
+    }
+    L_Info << "update thermostat for room " << roomno;
+    auto tmapit = _p->thermostats.find(src);
+    if (tmapit == _p->thermostats.end())
+    {
+        L_Err << "unable to find thermostat with rfaddr "
+              << std::hex << std::setw(6)
+              << std::setfill('0') << src;
+        return;
+    }
+    thermostat_state &ts = tmapit->second;
+    if (set_valve_desired(ts, valve, desired))
+        emit_update();
+}
+
+void ncube::update_wallthermostat(rfaddr src, float desired, float measured)
+{
+    unsigned roomno;
+    if (!room_from_rfaddr(src, roomno))    // if (roomno == 0)
+    {
+        L_Err << "no room found for rfaddr 0x" << std::hex << std::setw(6)
+              << std::setfill('0') << src;
+        return;
+    }
+    auto tmapit = _p->wallthermostats.find(src);
+    if (tmapit == _p->wallthermostats.end())
+    {
+        L_Err << "unable to find wallthermostat with rfaddr "
+              << std::hex << std::setw(6)
+              << std::setfill('0') << src;
+        return;
+    }
+    thermostat_state &ts = tmapit->second;
+
+    if (set_measured_desired(ts, desired, measured))
+        emit_update();
+}
+
+bool ncube::set_measured_desired(thermostat_state &ts, float desired, float measured)
+{
+    bool update = ((ts.desired != desired) || (ts.measured != measured));
+    if (update)
+    {
+        ts.desired = desired;
+        ts.measured = measured;
+    }
+    return update;
+}
+
+bool ncube::set_valve_desired(thermostat_state &ts, uint16_t valve, float desired)
+{
+    bool update = ((ts.valve != valve) || (ts.desired != desired));
+    if (update)
+    {
+        ts.valve = valve;
+        ts.desired = desired;
+    }
+    return update;
+}
+
+
+void ncube::emit_update()
+{
+    L_Info << __PRETTY_FUNCTION__;
+
+    std::map<unsigned, room_state> rms;
+    for (const auto &n: _p->thermostats)
+    {
+        rfaddr addr = n.first;
+        const thermostat_state &ts = n.second;
+        unsigned roomno = _p->room_map[addr];
+        const room_config &rc = _p->cdata[roomno];
+
+        std::string tname;
+        auto ctstat = rc.thermostats.find(n.first);
+
+        if (ctstat != rc.thermostats.end())
+            tname = ctstat->second;
+
+        rms[roomno].thermostats.push_back(ts);
+        rms[roomno].thermostats.back().name = tname;
+
+        rms[roomno].name = rc.name;
+    }
+
+    for (const auto &n: _p->wallthermostats)
+    {
+        rfaddr addr = n.first;
+        const thermostat_state &ts = n.second;
+        unsigned roomno = _p->room_map[addr];
+        const room_config &rc = _p->cdata[roomno];
+
+        rms[roomno].desired = n.second.desired;
+        rms[roomno].measured = n.second.measured;
+    }
+
+
+    std::shared_ptr<system_state> ssp = std::make_shared<system_state>();
+
+    for (auto &x: rms)
+    {
+        // calc valve average
+        room_state &rs = x.second;
+
+        unsigned valvesum = 0;
+        float measured = 0;
+        if (rs.thermostats.size())
+        {
+            for (const auto &t: rs.thermostats)
+            {
+                valvesum += t.valve;
+                measured += t.measured;
+            }
+            rs.valve = valvesum / rs.thermostats.size();
+            if (rs.measured < 1.0)
+                rs.measured = measured / rs.thermostats.size();
+
+            ssp->roomstates.emplace_back(rs);
+        }
+    }
+    _p->cb(ssp);
 }
 
 }

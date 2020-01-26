@@ -21,10 +21,45 @@ int main(int argc, char *argv[])
     read_config(cconfig);
 
     L_Trace << "start cube";
-    max_io::ncube mycube(argv[1], cconfig);
+    max_io::ncube mycube(argv[1], cconfig,[](std::shared_ptr<max_io::system_state> psysp){
+        std::ostringstream xs;
+
+        for (const auto n: psysp->roomstates)
+        {
+            xs << "\n\t" << n.name
+               << " desired:" << n.desired
+               << " measured:" << n.measured
+               << " valve:" << n.valve;
+               // << " tstats[";
+            for (const auto m: n.thermostats)
+            {
+                xs << "\n\t\t" << m.name
+                   << "(desired:" << m.desired
+                   << " measured:" << m.measured
+                   << " valve:" << m.valve
+                   << " mode:" << m.mode
+                   << ")";
+                if (!m.battery_ok || !m.link_valid || m.rf_err)
+                {
+                    xs << " Err: ";
+                    if (!m.battery_ok)
+                        xs << "bat-low;";
+                    if (!m.link_valid)
+                        xs << "link-err;";
+                    if (m.rf_err)
+                        xs << "rf-err;";
+                }
+            }
+        }
+        L_Trace << xs.str();
+
+    });
     L_Trace << "cube started";
 
-    std::this_thread::sleep_for(std::chrono::seconds(1000));
+    while (true)
+        std::this_thread::sleep_for(std::chrono::seconds(1000));
+
+    L_Trace << "cube terminate";
 
     return 0;
 }
@@ -60,7 +95,7 @@ void read_config(max_io::config &cnf)
                 thermostats[tit->second.as<uint32_t>()] = tit->first.as<std::string>();
             }
         }
-        max_io::room nr(rid, roomname);
+        max_io::room_config nr(rid, roomname);
         nr.thermostats.swap(thermostats);
         if (room["wallthermostat"])
         {
