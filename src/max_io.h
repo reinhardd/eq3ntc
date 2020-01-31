@@ -82,7 +82,7 @@ struct room_state
 {
     std::string name;
     float desired = { 0.0 };
-    float measured = { 0.0 };
+    float measured = { 0.0 };   
 
     unsigned valve;     // average over thermostats
 
@@ -123,10 +123,9 @@ public:
           callback f);
 private:
     void start();
-    void setup_port(const boost::system::error_code& error_code, std::size_t, unsigned state);
     void sync_setup_port();
-    void initialize_port();
     bool open_port();
+    void write_sync(std::string data);
     void enable_moritz();
     void start_packet_read();
     std::string get_received();
@@ -139,9 +138,7 @@ private:
 
     void sync_enable_moritz();
 
-    void start_async_write(const std::string &txd, std::function<void (const boost::system::error_code &, std::size_t)> fn);
-
-    void evaluate_version(std::string &&);
+    void start_async_write(std::string txd, std::function<void (const boost::system::error_code &, std::size_t)> fn);
 
     void evaluate_packet(std::string &&);
 
@@ -156,16 +153,17 @@ private:
 
     void process_data(std::string &&datain);
 
-    bool room_from_rfaddr(rfaddr src, unsigned &roomnr);
+    bool room_from_rfaddr(rfaddr src, unsigned &roomnr);    
 
-    void update_thermostat(rfaddr src, uint16_t valve, float desired);
-    void update_wallthermostat(rfaddr src, float desired, float measured);
+    void update_thermostat_mode_valve_desired(rfaddr src, opmode m, uint16_t valve, float desired);
+    void update_thermostat_mode_valve_desired_measured(rfaddr src, opmode m, uint16_t valve, float desired, float measured);
+    void update_wallthermostat_desired_measured(rfaddr src, float desired, float measured);
 
     void emit_update();
 
-    bool set_valve_desired(thermostat_state &, uint16_t valve, float desired);
+    bool set_mode_valve_desired(thermostat_state &, opmode m, uint16_t valve, float desired);
     bool set_measured_desired(thermostat_state &, float desired, float measured);
-    bool set_mode_desired(thermostat_state &, opmode mode, float measured);
+    bool set_mode_desired(thermostat_state &, opmode mode, float measured);    
 
 private:
     struct Private;
