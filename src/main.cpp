@@ -1,5 +1,6 @@
 
 #include <iostream>
+#include <iomanip>
 
 #include <yaml-cpp/yaml.h>
 
@@ -26,18 +27,18 @@ int main(int argc, char *argv[])
 
         for (const auto n: psysp->roomstates)
         {
-            xs << "\n\t" << n.name
-               << " desired:" << n.desired
-               << " measured:" << n.measured
-               << " valve:" << n.valve;
+            xs << "\n" << n.name << std::fixed
+               << "\nd:" << std::setw(4) << std::setprecision(1) << n.desired
+               << "°C m:" << std::setw(4) << std::setprecision(1) << n.measured
+               << "°C v:" << std::setw(3) << n.valve << "%";
                // << " tstats[";
             for (const auto m: n.thermostats)
             {
-                xs << "\n\t\t" << m.name
-                   << "(desired:" << m.desired
-                   << " measured:" << m.measured
-                   << " valve:" << m.valve
-                   << " mode:" << m.mode
+                xs << "\n" << std::string(20, ' ') << std::setw(16) << m.name
+                   << "(d:" << std::setw(4) << m.desired
+                   << "°C m:" << std::setw(4) << m.measured
+                   << "°C v:" << std::setw(3) << m.valve
+                   << "% mode:" << m.mode
                    << ")";
                 if (!m.battery_ok || !m.link_valid || m.rf_err)
                 {
