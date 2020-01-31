@@ -4,11 +4,9 @@
 #include <filesystem>
 #include <boost/bind.hpp>
 
-#include "max_io.h"
+#include "max_io_p.h"
+
 #include "log.h"
-
-
-namespace ba = boost::asio;
 
 namespace max_io {
 
@@ -111,10 +109,6 @@ std::ostream &operator<<(std::ostream &s, const opmode &m)
     return s;
 }
 
-enum struct comstate {
-    setupPort,
-    receiving
-};
 
 #if 0
 using tstamp = std::chrono::time_point<std::chrono::system_clock>;
@@ -143,48 +137,6 @@ struct thermostat_actual_values
 };
 #endif
 
-
-
-struct ncube::Private
-{
-    std::shared_ptr<ba::io_service> ios;
-    ba::serial_port sio;
-    ba::io_service::work work;
-    std::string port;
-    ba::streambuf rxbuf;
-    // ba::deadline_timer dlt;
-    ba::steady_timer versionto;
-
-    ba::steady_timer sampleto;
-
-    std::string txbuf;
-
-    comstate cstate;
-
-    // config rw
-    config cdata;
-    // workdata
-    std::thread thrd;    
-    // std::map<rfaddr, thermostat_actual_values> thermostats;
-    std::map<rfaddr, thermostat_state> thermostats;
-    std::map<rfaddr, thermostat_state> wallthermostats;
-
-
-    std::map<rfaddr, room_id> room_map;
-
-    callback cb;
-
-    Private(std::shared_ptr<ba::io_service> io, callback &ncb)
-        : ios(io)
-        , sio(*(ios.get()))
-        , work(*(ios.get()))
-        , versionto(*(ios.get()))
-        , sampleto(*ios)
-        , cb(ncb)
-    {
-        L_Dbg << "ios " << ios.get();
-    }
-};
 
 ncube::ncube(std::string port, const config &conf, callback cb)
 {
@@ -303,15 +255,6 @@ void ncube::start_async_write(std::string txd, std::function<void (const boost::
     _p->txbuf = txd;
     ba::async_write(_p->sio, ba::buffer(_p->txbuf.c_str(), _p->txbuf.size()), fn);
 }
-
-void ncube::evaluate_packet(std::string &&data)
-{
-    L_Trace << "packet data :" << data;
-
-    start_packet_read();
-}
-
-
 
 void ncube::start_packet_read()
 {

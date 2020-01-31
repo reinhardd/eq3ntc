@@ -4,11 +4,23 @@
 #include <string>
 #include <memory>
 #include <functional>
-#include <set>
+#include <map>
 #include <variant>
 #include <list>
+#include <chrono>
 #include <optional>
-#include <boost/asio.hpp>
+
+// forwards from namespace
+namespace boost {
+    namespace asio {
+        class io_context;
+    }
+    namespace system {
+        class error_code;
+    }
+}
+
+
 
 namespace max_io
 {
@@ -106,7 +118,6 @@ struct system_state
 
 using callback = std::function<void (std::shared_ptr<system_state>)>;
 
-
 class ncube
 {
 public:
@@ -139,11 +150,6 @@ private:
     void sync_enable_moritz();
 
     void start_async_write(std::string txd, std::function<void (const boost::system::error_code &, std::size_t)> fn);
-
-    void evaluate_packet(std::string &&);
-
-    //void version_read(const boost::system::error_code& error_code,
-    //                  std::size_t bytes_transferred);
 
     void packet_read(const boost::system::error_code& error_code,
                       std::size_t bytes_transferred);
