@@ -109,35 +109,6 @@ std::ostream &operator<<(std::ostream &s, const opmode &m)
     return s;
 }
 
-
-#if 0
-using tstamp = std::chrono::time_point<std::chrono::system_clock>;
-using tstamped_temp = std::pair<float, tstamp>;
-
-struct thermostat_actual_values
-{
-    tstamped_temp set;
-    tstamped_temp current;
-    unsigned valve; // 0 - 100
-
-    void set_set(float f)
-    {
-        set.first = f;
-        set.second = std::chrono::system_clock::now();
-    }
-    void set_current(float f)
-    {
-        current.first = f;
-        current.second = std::chrono::system_clock::now();
-    }
-    void set_valve(unsigned v)
-    {
-        valve = v;
-    }
-};
-#endif
-
-
 ncube::ncube(std::string port, const config &conf, callback cb)
 {
     L_Trace << "ncube on port " << port  << std::endl;
@@ -233,19 +204,6 @@ void ncube::sync_enable_moritz()
     write_sync("Zr");
     std::this_thread::sleep_for(std::chrono::milliseconds(500));
 }
-
-#if 0
-void ncube::sync_setup_port()
-{
-    if (!open_port())
-        throw std::runtime_error("port open failed");
-    ba::write(_p->sio, boost::asio::buffer("Zx\r\n", 4));     // disable
-    std::this_thread::sleep_for(std::chrono::seconds(1));
-    ba::write(_p->sio, boost::asio::buffer("X22\r\n", 4));    // hex with RSSI
-    std::this_thread::sleep_for(std::chrono::seconds(1));
-    ba::write(_p->sio, ba::buffer("Zr\r\n", 4));
-}
-#endif
 
 void ncube::start_async_write(std::string txd, std::function<void (const boost::system::error_code &, std::size_t)> fn)
 {
