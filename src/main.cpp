@@ -2,6 +2,7 @@
 #include <iostream>
 #include <iomanip>
 #include <thread>
+#include <boost/algorithm/string.hpp>
 
 #include <yaml-cpp/yaml.h>
 
@@ -22,6 +23,7 @@ int main(int argc, char *argv[])
     max_io::config cconfig;
     read_config(cconfig);
 
+    {
     L_Trace << "start cube";
     max_io::ncube mycube(argv[1], cconfig,[](std::shared_ptr<max_io::system_state> psysp){
         std::ostringstream xs;
@@ -56,13 +58,23 @@ int main(int argc, char *argv[])
         L_Trace << xs.str();
 
     });
-    L_Trace << "cube started";
+    L_Trace << "cube started -- enter cmd loop";
 
-    while (true)
-        std::this_thread::sleep_for(std::chrono::seconds(1000));
+    bool exit = false;
+    while (!exit)
+    {
+        // std::this_thread::sleep_for(std::chrono::seconds(1000));
+        std::string input;
+        std::getline(std::cin, input);
+        std::cout << "cmd " << input << std::endl;
+        boost::trim(input);
+        if (input == "quit")
+            exit = true;
+    }
 
     L_Trace << "cube terminate";
-
+    }
+    L_Trace << "cube terminated";
     return 0;
 }
 
