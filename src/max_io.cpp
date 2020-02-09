@@ -58,12 +58,12 @@ std::string devflags_to_string(uint8_t f)
 {
     std::ostringstream xs;
     xs << std::hex << std::setfill('0') << std::setw(2) << uint16_t(f);
-    xs << "|M:" << (f & 3) << ";"
-       << ";DST:" << std::boolalpha << (f & 8)
-       << ";LNK:" << std::boolalpha << (f & 0x10)
-       << ";PLCK:" << std::boolalpha << (f & 0x20)
-       << ";RFERR:" << std::boolalpha << (f & 0x40)
-       << ";BATLOW:" << std::boolalpha << (f & 0x80)
+    xs << "|M:" << (f & 3)
+       << ";DST:" << ((f & 8) == 0x08)
+       << ";LNK:" << ((f & 0x10) == 0x10)
+       << ";PLCK:" << ((f & 0x20) == 0x20)
+       << ";RFERR:" << ((f & 0x40) == 0x40)
+       << ";BATLOW:" << ((f & 0x80) == 0x80)
        << ";";
     return xs.str();
 }
@@ -83,6 +83,22 @@ std::string dump(const std::string &s)
         os << std::setw(2) << uint16_t(c);
     }
     return os.str();
+}
+
+std::string build_cmd(const tx_data &txd, uint8_t counter)
+{
+    std::ostringstream builder;
+    uint16_t len = 10 + txd.payload.size() / 2;
+    builder << std::hex << std::setfill('0') << std::uppercase
+            << "Zs" << std::setw(2) << len
+            << std::setw(2) << uint16_t(counter)
+            << std::setw(2) << uint16_t(txd.flag)
+            << std::setw(2) << uint16_t(txd.msgtype)
+            << std::setw(6) << txd.src
+            << std::setw(6) << txd.dest
+            << std::setw(2) << uint16_t(txd.gr_id)
+            << txd.payload;
+    return builder.str();
 }
 
 }
@@ -110,20 +126,110 @@ std::ostream &operator<<(std::ostream &s, const opmode &m)
 }
 
 ncube::ncube(std::string port, const config &conf, callback cb)
+    : ncube(port, conf, std::make_shared<ba::io_service>(), cb)
 {
     L_Trace << "ncube on port " << port  << std::endl;
-    _p = std::make_shared<Private>(std::make_shared<ba::io_service>(), cb);
-    _p->cdata = conf;
-    _p->port = port;
-    start();
 }
 
 ncube::ncube(std::string port, const config &conf, std::shared_ptr<boost::asio::io_service> ios, callback cb)
+    : _p(std::make_unique<Private>(ios, cb))
 {
-    _p = std::make_shared<Private>(ios, cb);
+    L_Trace << "x ncube on port " << port  << std::endl;
     _p->port = port;
     _p->cdata = conf;
     start();
+}
+
+ncube::~ncube()
+{
+    _p->ios->stop();
+    _p->thrd.join();
+}
+
+void ncube::mark_updated(rfaddr addr)
+{
+    if (is_thermostat(addr))
+    {
+        _p->thermostats.find(addr)->second.updated = std::chrono::steady_clock::now();
+    }
+}
+
+void ncube::stop_overdue_poll()
+{
+    _p->overdueto.cancel();
+}
+
+void ncube::send_wakeup(rfaddr addr)
+{
+    L_Trace << __PRETTY_FUNCTION__;
+}
+
+void ncube::start_overdue_poll()
+{
+    L_Trace << __PRETTY_FUNCTION__;
+    _p->overdueto.expires_from_now(std::chrono::seconds(10));
+    _p->overdueto.async_wait([this](const boost::system::error_code &e){
+        if (!e)
+        {
+            L_Info << "overdue timeout";
+            rfaddr addr;
+            bool have_one = next_overdue(addr);
+            if (have_one)
+            {
+                L_Info << "overdue have one";
+                send_wakeup(addr);
+            }
+
+            _p->overdueto.expires_from_now(std::chrono::seconds(have_one ? 20 : 2));
+        }
+        else
+        {
+            L_Info << "overdue cancel";
+        }
+    });
+}
+
+bool ncube::is_overdue(rfaddr addr)
+{
+    L_Trace << __PRETTY_FUNCTION__;
+    auto &tstat_or_wall =
+            is_thermostat(addr) ? _p->thermostats.find(addr)->second
+                                : _p->wallthermostats.find(addr)->second;
+
+    const auto &lastupd = tstat_or_wall.updated;
+
+    std::chrono::steady_clock::time_point endt = lastupd + std::chrono::seconds(20);
+
+    if (std::chrono::steady_clock::now() > endt)
+    {
+        auto diff = std::chrono::steady_clock::now() - endt;
+        auto int_sec = std::chrono::duration_cast<std::chrono::seconds>(diff);
+
+        L_Info << tstat_or_wall.name
+               << " overdue for "
+               << int_sec.count()
+               << " seconds";
+    }
+
+    return false;
+}
+
+bool ncube::next_overdue(rfaddr &addr)
+{
+    L_Trace << __PRETTY_FUNCTION__;
+#if 0
+    unsigned maxsearches = _p->all_components.size();
+    for (unsigned u = 0; u < maxsearches; ++u)
+    {
+        rfaddr a = _p->all_components[u];
+        if (is_overdue(a))
+        {
+            addr = a;
+            return true;
+        }
+    }
+#endif
+    return false;
 }
 
 void ncube::setup_workdata()
@@ -136,6 +242,7 @@ void ncube::setup_workdata()
         {
             _p->thermostats.emplace(std::pair(cit->first, thermostat_state(cit->second)));
             _p->room_map[cit->first] = roomno;
+            // _p->all_components.push_back(cit->first);
             L_Info << "added " << cit->second << " to " << roomno << ':' << rc.name;
         }
 
@@ -143,6 +250,7 @@ void ncube::setup_workdata()
         {
             _p->wallthermostats.emplace(std::pair(rc.wallthermostat, thermostat_state("wt")));
             _p->room_map[n.second.wallthermostat] = n.first;
+            // _p->all_components.push_back(rc.wallthermostat);
             L_Info << "added wt to " << roomno << ':' << rc.name;
         }
     }
@@ -189,7 +297,7 @@ bool ncube::open_port()
 
 void ncube::write_sync(std::string data)
 {
-    L_Info << "write sync: " << data;
+    L_Trace << "write sync: " << data;
     data.push_back('\r');
     data.push_back('\n');
     ba::write(_p->sio, boost::asio::buffer(data.c_str(), data.size()));
@@ -205,9 +313,31 @@ void ncube::sync_enable_moritz()
     std::this_thread::sleep_for(std::chrono::milliseconds(500));
 }
 
+void ncube::send_async(std::string txd, write_callback sacb, unsigned max_tries)
+{
+#if 0
+    Private::tx_unit txu(txd, sacb, max_tries);
+    _p->txqueue.push_back(txu);
+    if (_p->txqueue.size() == 1)
+    {
+        _p->txqueue.front().attempt = 1;
+        start_async_write(_p->txqueue.front().txbuf,
+                          //std::function<void (const boost::system::error_code &, std::size_t)> fn
+            [this](const boost::system::error_code &err, std::size_t ) {
+                if (err)
+                {
+                    auto first = _p->txqueue.front();
+                    _p->txqueue.pop_front();
+                    first.cb(false);
+                }
+        });
+    }
+#endif
+}
+
 void ncube::start_async_write(std::string txd, std::function<void (const boost::system::error_code &, std::size_t)> fn)
 {
-    L_Info << "start write " << txd;
+    L_Info << __FUNCTION__ << ": " << txd;
     txd.push_back('\r');
     txd.push_back('\n');
     _p->txbuf = txd;
@@ -216,7 +346,7 @@ void ncube::start_async_write(std::string txd, std::function<void (const boost::
 
 void ncube::start_packet_read()
 {
-    L_Trace << "start read\n";
+    L_Trace << __FUNCTION__;
     ba::async_read_until(_p->sio, _p->rxbuf, delimiter,
                          boost::bind(&ncube::packet_read, this, ba::placeholders::error,
                                      ba::placeholders::bytes_transferred));
@@ -253,7 +383,7 @@ void ncube::packet_read(const boost::system::error_code& error_code,
         ba::streambuf::const_buffers_type constBuffer = _p->rxbuf.data();
 
         std::string datain = get_received();
-        L_Trace << "received " << datain;
+        L_Dbg << "received " << datain;
 
         if (datain.size())
         {
@@ -314,7 +444,7 @@ unsigned uvalue(const char *pD, unsigned len)
 
 void ncube::process_event(const max_io::event_t &evt)
 {
-    L_Trace << "process_event " << static_cast<int>(evt.first);
+    L_Trace << __FUNCTION__ << " " << static_cast<int>(evt.first);
     switch (evt.first)
     {
         case event_e::Start:
@@ -324,20 +454,20 @@ void ncube::process_event(const max_io::event_t &evt)
                 start_packet_read();
                 start_async_write("V", [](const boost::system::error_code &e, std::size_t){
                     if (!e)
-                        L_Info << "V write done";
+                        L_Trace << "Version cmd write done";
                     else
-                        L_Info << "V write failed";
+                        L_Err << "Version cmd write failed";
                 });
 
                 _p->versionto.expires_from_now(std::chrono::seconds(10));
                 _p->versionto.async_wait([this](const boost::system::error_code &e){
                     if (!e)
                     {
-                        L_Info << "v timeout";
+                        L_Err << "Version cmd timeout";
                         process_event(event_t(event_e::VersionTimeout,std::monostate()));
                     }
                     else
-                        L_Info << "v cancel";
+                        L_Trace << "Version cmd canceled";
                 });
             }
             else
@@ -349,6 +479,7 @@ void ncube::process_event(const max_io::event_t &evt)
             {
                 _p->cstate = comstate::receiving;
                 sync_enable_moritz();
+                L_Info << "start input processing";
             }
             break;
         case event_e::GotPacket:
@@ -388,10 +519,18 @@ void ncube::process_data(std::string &&datain)
 {
     std::size_t dsz = datain.size();
     if (dsz < 21)
+    {
         L_Err << "invalid msg: " << datain;
+        return;
+    }
 
     // uint8_t possibly_rssi = uvalue(datain.end()-2, 2);
-    L_Info << "got packet sz " << datain.size() << " : " << datain;
+    // L_Info << "got packet sz " << datain.size() << " : " << datain;
+    auto get_input_info = [&datain]() {
+        std::ostringstream xs;
+        xs << "data[" << datain.size() << ": " << datain << "]";
+        return xs.str();
+    };
 
     // 12345678901234567890123456789012345
     // Z0F 00  04   60  1AF6DD 000000 00 18 00 0C 00 CD F8
@@ -405,7 +544,7 @@ void ncube::process_data(std::string &&datain)
 
     const char *pData = datain.c_str();
     unsigned len = uvalue(pData+1, 2);
-    L_Info << "len " << len << " sz " << datain.size();
+    // L_Info << "len " << len << " sz " << datain.size();
     int8_t rssi = 0;
     bool with_rssi = (dsz == (len * 2 + 5));
     if (with_rssi)
@@ -454,16 +593,21 @@ void ncube::process_data(std::string &&datain)
                     uint32_t endt = getdata(31, 6);
                     aux << temp_end2_string(endt);
                 }
-                L_Info << "Ack rsp state:" << uint16_t(state)
+                L_Info << get_input_info()
+                       << " -> { Ack rsp state:" << uint16_t(state)
                        << " mode:" << int(flags & 3)
                        << " valve:" << uint16_t(valve)
                        << " desired:" << float(desired/2.0)
                        << " flags:" << devflags_to_string(flags)
-                       << aux.str();
+                       << aux.str()
+                       << "}";
+
                 update_thermostat_mode_valve_desired(src, static_cast<opmode>(flags & 3), valve, float(desired/2.0));
+
+                // check if we have a pending transmit waiting
             }
             else
-                L_Err << "src " << src << "not a thermostat";
+                L_Err << "src " << std::hex << std::setw(6) << src << "not a thermostat";
             break;
         case cmds::ThermostatState:
             if (is_thermostat(src))
@@ -488,51 +632,22 @@ void ncube::process_data(std::string &&datain)
                     xs << " measured:" << measured;
                 }
 
-                L_Info << "TState:" << uint16_t(roomid)
+                L_Info << get_input_info()
+                       << " -> { TState:" << uint16_t(roomid)
                        << " flags:" << std::hex << uint16_t(flags) << std::dec
                        << " mode:" << unsigned(mode)
                        << " valve:" << uint16_t(valve)
                        << " desired:" << float(desired/2.0)
-                       << xs.str();
-                update_thermostat_mode_valve_desired_measured(src, static_cast<opmode>(flags & 3), valve, float(desired/2.0), measured);
+                       << xs.str() << " }";
+                if (withmeasured)
+                    update_thermostat_mode_valve_desired_measured(src, static_cast<opmode>(flags & 3), valve, float(desired/2.0), measured);
+                else
+                    update_thermostat_mode_valve_desired(src, static_cast<opmode>(flags & 3), valve, float(desired/2.0));
 
             }
             break;
         case cmds::SetTemperature:
             {
-#if 0
-                [2020-01-22 21:05:27.326364] [0x00007fe58e4a9700] [info]    got packet Z0B73054017068D1A9CA701285B
-                [2020-01-22 21:05:27.326403] [0x00007fe58e4a9700] [info]    set mode and temp: 0 0.5°C
-                [2020-01-22 21:05:27.326448] [0x00007fe58e4a9700] [info]    MT 40  s(Cube:WT) d(Wohnzimmer:Erker rechts) pl 01285B
-
-                  01285B
-                  01 room
-                  28 mode + temp    0x28 & 0x7f => 0x28 => 40 / 2 => 20 °C
-                  5B
-                  5B => 91
-
-                  // with vacation to 31.1.2020 18:00
-                  [2020-01-22 22:09:11.998688] [0x00007f2a4ad78700] [trace]   process_event 2
-                  [2020-01-22 22:09:11.998715] [0x00007f2a4ad78700] [info]    got packet sz 33 : Z0E8E054017068D1AF58705891F942459
-                  [2020-01-22 22:09:11.998767] [0x00007f2a4ad78700] [info]    set room: 5 mode: 2 temp: 4.5vacation temp 15.5 temp end  temp end 8.8.2036 12:30
-                  [2020-01-22 22:09:11.998822] [0x00007f2a4ad78700] [info]    MT 40  s(Cube:WT) d(ELW Schlafzimmer:ELW Schlafzimmer) pl 05891F942459
-
-                  Z0E8E0540 17068D 1AF587 05891F942459
-                  05    room
-                  89    cb mode(89 >> 6 => 2 =>vac)  desired(89 & 7f => 9 9 / 2 => 4.5)
-                  1F942459
-
-                  Mode 1 Manual
-                  [2020-01-22 22:19:40.912969] [0x00007f8dbad42700] [info]    got packet sz 27 : Z0B8F05 40 17068D 1AF587 05495C
-                  [2020-01-22 22:19:40.913001] [0x00007f8dbad42700] [info]    set room: 5 mode: 1
-                  [2020-01-22 22:19:40.913067] [0x00007f8dbad42700] [info]    MT 40  s(Cube:WT) d(ELW Schlafzimmer:ELW Schlafzimmer) pl 05495C
-
-                  05  room
-                  49  cd Mode(49 >> 6 => 1 =>manual) desired(49&3f => 9 /2.0 => 4.5)
-                  5C
-
-
-#endif
                 uint8_t room = static_cast<uint8_t>(getdata(21, 2));
                 uint8_t cb = static_cast<uint8_t>(getdata(23, 2));
                 unsigned mode = (cb >> 6);
@@ -564,10 +679,11 @@ void ncube::process_data(std::string &&datain)
                     }
                 }
 
-                L_Info << "set room: " << uint16_t(room)
+                L_Info << get_input_info() << " -> { set room: " << uint16_t(room)
                        << " mode: " << unsigned(mode)
                        << " desired: " << desired
-                       << xs.str();
+                       << xs.str()
+                       << "}";
             }
             break;
         case cmds::WallThermostatState:
@@ -583,28 +699,18 @@ void ncube::process_data(std::string &&datain)
                 uint8_t misc = static_cast<uint8_t>(getdata(21, 2));
                 uint8_t desired_raw = static_cast<uint8_t>(getdata(23, 2));
                 uint8_t measured_raw = static_cast<uint8_t>(getdata(25, 2));
-#if 0
-                wt ctrl desired:0 measured:4.1
-                MT 42  s(Wohnzimmer:WT) d(Wohnzimmer:Spitzerker links) pl 0029D31B
-                0029D31B
-                  desired_raw 0x29 b00101001
-                  desired 0x29 & 0x27 => 0x29 => 41 / 2.0 => 20,1
-
-
-
-#endif
-
                 float desired = (desired_raw & 0x7F) / 2.0;
                 float measured = ((uint16_t(desired_raw & 0x80) << 1) + measured_raw) / 10.0 ;
 
-                L_Info << "wt ctrl desired:" << desired << " measured:" << measured;
+                L_Info << get_input_info() << " -> { wt-ctrl desired:" << desired << " measured:" << measured << "}";
 
                 update_wallthermostat_desired_measured(src, desired, measured);
 
             }
             break;
         default:
-            L_Err << "unknown cmd 0x" << std::hex << std::setw(2) << std::setfill('0') << mt << std::dec;
+            L_Err << get_input_info() << " {unknown cmd 0x" << std::hex << std::setw(2) << std::setfill('0')
+                  << mt << std::dec << "}";
             break;
     }
 
@@ -644,6 +750,8 @@ void ncube::process_data(std::string &&datain)
 
 thermostat_state::thermostat_state(std::string name)
     : name(name)
+    , updated(std::chrono::steady_clock::now())
+    , counter(1)
 {}
 
 bool thermostat_state::operator!=(const thermostat_state &ts)
@@ -681,7 +789,7 @@ void ncube::update_thermostat_mode_valve_desired_measured(rfaddr src, opmode m, 
               << std::setfill('0') << src;
         return;
     }
-    L_Info << "update thermostat for room " << roomno;
+    L_Trace << "update thermostat for room " << roomno;
     auto tmapit = _p->thermostats.find(src);
     if (tmapit == _p->thermostats.end())
     {
@@ -691,8 +799,9 @@ void ncube::update_thermostat_mode_valve_desired_measured(rfaddr src, opmode m, 
         return;
     }
     thermostat_state &ts = tmapit->second;
-    if (set_mode_valve_desired(ts, m, valve, desired) ||
-        set_measured_desired(ts, desired, measured))
+    bool smvd = set_mode_valve_desired(ts, m, valve, desired);
+    bool smd = set_measured_desired(ts, desired, measured);
+    if (smvd || smd)
         emit_update();
 
 }
@@ -706,7 +815,7 @@ void ncube::update_thermostat_mode_valve_desired(rfaddr src, opmode m, uint16_t 
               << std::setfill('0') << src;
         return;
     }
-    L_Info << "update thermostat for room " << roomno;
+    L_Trace << "update thermostat for room " << roomno;
     auto tmapit = _p->thermostats.find(src);
     if (tmapit == _p->thermostats.end())
     {
@@ -782,7 +891,7 @@ bool ncube::set_mode_valve_desired(thermostat_state &ts, opmode m, uint16_t valv
 
 void ncube::emit_update()
 {
-    L_Info << __PRETTY_FUNCTION__;
+    L_Trace << __PRETTY_FUNCTION__;
 
     std::map<unsigned, room_state> rms;
     for (const auto &n: _p->thermostats)
@@ -864,7 +973,147 @@ void ncube::emit_update()
             ssp->roomstates.emplace_back(rs);
         }
     }
-    _p->cb(ssp);
+    _p->host_cb(ssp);
 }
 
+bool ncube::get_room_id(rfaddr addr, uint8_t &rid) const
+{
+    auto room_it = _p->room_map.find(addr);
+    if (room_it != _p->room_map.end())
+    {
+        rid = room_it->second;
+        return true;
+    }
+    return false;
+}
+
+void ncube::_wakeup(rfaddr addr)
+{
+    L_Info << __FUNCTION__;
+
+    std::map<rfaddr, thermostat_state>::iterator it;
+
+    if (is_thermostat(addr))
+    {
+        it = _p->thermostats.find(addr);
+    }
+    else if (is_wallthermostat(addr))
+    {
+        it = _p->wallthermostats.find(addr);
+    }
+    else
+    {
+        L_Err << "dev " << std::hex << std::setw(6) << std::setfill('0') << addr
+              << " is neither thermostat nor wallthermostat";
+        return;
+    }
+
+    uint8_t roomid = 0;
+    if (!get_room_id(addr, roomid))
+    {
+        L_Err << "unable to find roomid for dev " << std::hex << std::setw(6) << std::setfill('0') << addr;
+        return;
+    }
+    auto room_it = _p->room_map.find(addr);
+    if (room_it != _p->room_map.end())
+        roomid = room_it->second;
+
+    uint8_t counter = it->second.counter++;
+
+    std::string tosend = build_cmd(tx_data(uint8_t(0x05), uint8_t(0xf1), _p->cdata[0].wallthermostat, addr, roomid, std::string("3F")), counter);
+    start_async_write(tosend,[](const boost::system::error_code &err, std::size_t sz){
+        L_Info << "wakeup send done " << err.message() << ':' << sz;
+    });
+}
+
+void ncube::start_job(job j, job_callback cb)
+{
+    L_Trace << __FUNCTION__ << ": "  << static_cast<int>(j.first);
+    _p->ios->post(std::bind(&ncube::_run_job, this, j, cb));
+}
+
+uint8_t ncube::get_inc_counter(rfaddr addr)
+{
+    std::map<rfaddr, thermostat_state>::iterator it;
+    if (is_thermostat(addr))
+    {
+        it = _p->thermostats.find(addr);
+    }
+    else if (is_wallthermostat(addr))
+    {
+        it = _p->wallthermostats.find(addr);
+    }
+    else
+        return 0;
+
+    uint8_t counter = it->second.counter++;
+    if (counter == 0)   // skip zero -> signals error
+        counter = it->second.counter++;
+    return counter;
+}
+
+bool ncube::start_send(const tx_data &txd)
+{
+    L_Trace << __PRETTY_FUNCTION__ << " to " << txd.dest;
+    uint8_t counter = get_inc_counter(txd.dest);
+    if (!counter)
+        return false;
+    std::string tosend = build_cmd(txd, counter);
+    start_async_write(tosend,[](const boost::system::error_code &err, std::size_t sz){
+        L_Info << "send done " << err.message() << ':' << sz;
+    });
+    return true;
+}
+
+bool ncube::add_send_job(tx_data &&txd, job_callback cb)
+{
+    L_Trace << __PRETTY_FUNCTION__ << " to " << txd.dest;
+    if (_p->tx_states.find(txd.dest) == _p->tx_states.end())
+    {
+        L_Trace << "create tx state\n";
+        _p->tx_states[txd.dest] = std::make_unique<dev_tx_status>(_p->ios.get());
+    }
+
+    auto &dev = _p->tx_states[txd.dest];
+
+    if (dev->current_tx)
+    {
+        L_Trace << "add to queue";
+        dev->waiting_for_send.push_back(txd);
+    }
+    else
+    {
+        L_Trace << "send direct ";
+        dev->current_tx = tx_unit(txd, cb);
+        start_send((dev->current_tx)->txd);
+    }
+    return false;
+}
+
+void ncube::_run_job(job j, job_callback cb)
+{
+    L_Info << __FUNCTION__ << " job: " << static_cast<int>(j.first);
+    switch (j.first)
+    {
+        case job_type::test_wakeup:
+            {
+                rfaddr todev = std::get<rfaddr>(j.second);
+                uint8_t roomid = 0;
+                if (!get_room_id(todev, roomid))
+                {
+                    L_Err << "unable to get room id";
+                    cb(false);
+                    return;
+                }
+                tx_data senddata(0x05, 0xf1, _p->cdata[0].wallthermostat, todev, roomid, std::string("3F"));
+                if (!add_send_job(std::move(senddata), cb))
+                    cb(false);
+                else
+                    L_Info << "tx initiated";
+
+                // _wakeup(std::get<rfaddr>(j.second));
+            }
+            break;
+    }
+}
 }

@@ -46,6 +46,7 @@ struct room_config
 
 
 struct thermostat_state;
+struct tx_data;
 
 using config = std::map<room_id, room_config>;
 
@@ -69,7 +70,7 @@ enum struct opmode:uint16_t {
 std::ostream &operator<<(std::ostream &s, const opmode &m);
 
 
-using tstamp = std::chrono::time_point<std::chrono::system_clock>;
+using tstamp = std::chrono::time_point<std::chrono::steady_clock>;
 
 struct thermostat_state
 {
@@ -86,6 +87,8 @@ struct thermostat_state
 
     tstamp updated;
 
+    uint8_t counter;
+
     thermostat_state(std::string name);
     bool operator!=(const thermostat_state &ts);
 };
@@ -98,12 +101,6 @@ struct room_state
 
     unsigned valve;     // average over thermostats
 
-#if 0
-    using v_tstate = std::pair<
-                            unsigned,           // update counter
-                            thermostat_state    // state
-                            >;
-#endif
     std::list<thermostat_state> thermostats;
 
     std::optional<thermostat_state> wallthermostat;
@@ -118,8 +115,26 @@ struct system_state
 
 using callback = std::function<void (std::shared_ptr<system_state>)>;
 
+using write_callback =
+        std::function<void (
+                            bool,    // success
+                            unsigned // on attempt
+                           )>;
+
+using job_callback = std::function<void (bool)>;
+
+
 class ncube
 {
+public: // types
+    enum struct job_type {
+
+        test_wakeup = 100,
+
+    };
+    using job_parameter = std::variant<rfaddr>;
+    using job_data = std::pair<job_type, job_parameter>;
+    using job = std::pair<job_type, job_parameter>;
 public:
 
 //     using callback = std::function< void ( std::shared_ptr<system_state> ) >;
@@ -132,6 +147,17 @@ public:
           const config &config,
           std::shared_ptr<boost::asio::io_context> ios,
           callback f);
+
+    ~ncube();
+
+    void wakeup(rfaddr addr, job_callback cb)
+    {
+        start_job(job_data(job_type::test_wakeup, addr), cb);
+    }
+
+    void start_job(job j, job_callback cb);
+
+
 private:
     void start();
     void sync_setup_port();
@@ -141,6 +167,9 @@ private:
     void start_packet_read();
     std::string get_received();
 
+    void _run_job(job j, job_callback cb);
+    void _wakeup(rfaddr addr);
+
     void setup_workdata();
     bool is_thermostat(rfaddr rf) const;
     bool is_wallthermostat(rfaddr rf) const;
@@ -148,6 +177,8 @@ private:
     std::string devinfo(rfaddr a);
 
     void sync_enable_moritz();
+
+    void send_async(std::string txd, write_callback sacb, unsigned max_tries = 3);
 
     void start_async_write(std::string txd, std::function<void (const boost::system::error_code &, std::size_t)> fn);
 
@@ -171,9 +202,22 @@ private:
     bool set_measured_desired(thermostat_state &, float desired, float measured);
     bool set_mode_desired(thermostat_state &, opmode mode, float measured);    
 
+    void mark_updated(rfaddr addr);
+    bool next_overdue(rfaddr &addr);
+    bool is_overdue(rfaddr addr);
+    void start_overdue_poll();
+    void stop_overdue_poll();
+    void send_wakeup(rfaddr addr);
+
+    bool get_room_id(rfaddr addr, uint8_t &rid) const;
+    bool add_send_job(tx_data &&txd, job_callback cb);
+    bool start_send(const tx_data &txd);
+
+    uint8_t get_inc_counter(rfaddr addr);
+
 private:
     struct Private;
-    std::shared_ptr<Private> _p;
+    std::unique_ptr<Private> _p;
 };
 
 }
