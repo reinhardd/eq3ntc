@@ -70,6 +70,21 @@ int main(int argc, char *argv[])
         boost::trim(input);
         if (input == "quit")
             exit = true;
+        else if (input.substr(0,3) == "wup")
+        {
+            input.erase(0,3);
+            boost::trim(input);
+            std::istringstream ix(input);
+            uint32_t rfaddr = 0;
+            ix >> std::hex >> rfaddr;
+            std::cout << "addr " << std::hex << rfaddr << std::endl;
+            using job_type = max_io::ncube::job_type;
+            using job_data = max_io::ncube::job_data;
+            mycube.start_job(job_data(job_type::test_wakeup, rfaddr), [](bool res){
+                L_Info << "wup job finished " << std::boolalpha << res;
+            });
+        }
+
     }
 
     L_Trace << "cube terminate";
@@ -81,10 +96,31 @@ int main(int argc, char *argv[])
 
 void init()
 {
-    boost::log::core::get()->set_filter
+    namespace logging = boost::log;
+    namespace src = boost::log::sources;
+    namespace expr = boost::log::expressions;
+    namespace keywords = boost::log::keywords;
+#if 0
+    logging::add_file_log
+    (
+        keywords::file_name = "sample_%N.log",
+        // This makes the sink to write log records that look like this:
+        // 1: <normal> A normal severity message
+        // 2: <error> An error severity message
+        keywords::format =
+        (
+            expr::stream
+                << expr::attr< unsigned int >("LineID")
+                << ": <" << logging::trivial::severity
+                << "> " << expr::smessage
+        )
+    );
+#endif
+    logging::core::get()->set_filter
     (
         boost::log::trivial::severity >= boost::log::trivial::trace
-    );
+    );    
+    L_Info << "start logging\n";
 }
 
 void read_config(max_io::config &cnf)
