@@ -515,6 +515,31 @@ std::string temp_end2_string(uint32_t endt)
     return aux.str();
 }
 
+std::string temp_end_set_vacation(uint32_t endt)
+{
+#if 0
+             765432107654321076543210
+    81930d = 100000011001001100001101 = 1.9.19 6:30
+             ||||||||||||||||||||||||
+             ||||||||||||||||||++++++-----------------------Time *2 (001100 = 13 / 2 = 6.5 = 6:30)
+             ||||||||||||||||++-----------------------------???
+             ||||||||||++++++-------------------------------year (010011 = 19)
+             |||||||||+-------------------------------------???
+             |||+++++|--------------------------------------Day (00001 = 1)
+             +++-----+--------------------------------------month (1001 = 9 = September)
+#endif
+    unsigned month = ((endt >> 21) << 1) + (endt & 0x8000 ? 1 : 0);
+    unsigned day = (endt >> 16) & 0x1f;
+    unsigned year = 2000 +((endt >> 8) & 0x3f);
+    unsigned hour = (endt & 0x3f) / 2;
+    unsigned min = (endt & 0x3f) % 2 ? 30 : 0;
+    std::ostringstream aux;
+    aux << day << '.' << month << '.' << year
+        << std::setfill('0')
+        << ' ' << std::setw(2) << hour << ':' << std::setw(2) << min;
+    return aux.str();
+}
+
 void ncube::process_data(std::string &&datain)
 {
     std::size_t dsz = datain.size();
@@ -656,9 +681,9 @@ void ncube::process_data(std::string &&datain)
                 std::ostringstream xs;
                 if (mode == 2) // vacation
                 {
-                    uint32_t temp_end = static_cast<uint32_t>(getdata(27, 6));
+                    uint32_t temp_end = static_cast<uint32_t>(getdata(25, 6));
                     // until decoding not right here
-                    xs << " vacation " << desired << "°C until " << temp_end2_string(temp_end);
+                    xs << " vacation until " << temp_end_set_vacation(temp_end);
                 }
                 else if (mode == 1)
                 {
@@ -1052,12 +1077,9 @@ uint8_t ncube::get_inc_counter(rfaddr addr)
     return counter;
 }
 
-bool ncube::start_send(const tx_data &txd)
+bool ncube::start_send(const tx_data &txd, uint8_t counter)
 {
     L_Trace << __PRETTY_FUNCTION__ << " to " << txd.dest;
-    uint8_t counter = get_inc_counter(txd.dest);
-    if (!counter)
-        return false;
     std::string tosend = build_cmd(txd, counter);
     start_async_write(tosend,[](const boost::system::error_code &err, std::size_t sz){
         L_Info << "send done " << err.message() << ':' << sz;
@@ -1067,27 +1089,65 @@ bool ncube::start_send(const tx_data &txd)
 
 bool ncube::add_send_job(tx_data &&txd, job_callback cb)
 {
-    L_Trace << __PRETTY_FUNCTION__ << " to " << txd.dest;
-    if (_p->tx_states.find(txd.dest) == _p->tx_states.end())
+    rfaddr dest = txd.dest;
+    L_Trace << __PRETTY_FUNCTION__ << " to " << dest;
+    if (_p->tx_states.find(dest) == _p->tx_states.end())
     {
         L_Trace << "create tx state\n";
-        _p->tx_states[txd.dest] = std::make_unique<dev_tx_status>(_p->ios.get());
+        _p->tx_states[dest] = std::make_unique<dev_tx_status>(_p->ios.get());
     }
 
-    auto &dev = _p->tx_states[txd.dest];
+
+    auto &dev = _p->tx_states[dest];
 
     if (dev->current_tx)
     {
         L_Trace << "add to queue";
-        dev->waiting_for_send.push_back(txd);
+        dev->waiting_for_send.push_back(tx_unit(txd, cb));
     }
     else
     {
         L_Trace << "send direct ";
+        uint8_t counter = get_inc_counter(dest);
+        if (!counter)
+        {
+            return false;
+        }
+        dev->waiting_on = counter;
         dev->current_tx = tx_unit(txd, cb);
-        start_send((dev->current_tx)->txd);
+        tx_unit &txu = *(dev->current_tx);
+        start_send(txu.txd, dev->waiting_on);
+        dev->rxto.expires_from_now(std::chrono::seconds(3));
+
+        dev->rxto.async_wait([this, dest, counter](const boost::system::error_code &e){
+            L_Info << "rxto expired for " << std::hex << dest << " err: " << e.message();
+            send_job_response(dest, counter, !e);
+        });
+
     }
     return false;
+}
+
+void ncube::send_job_response(rfaddr dest, uint8_t counter, bool res)
+{
+    L_Info << __FUNCTION__ << " addr " << std::hex << dest << " cnt " << counter << " res " << res;
+
+    auto n = _p->tx_states.find(dest);
+    if (n == _p->tx_states.end())
+    {
+        L_Err << "not found any device state for " << std::hex << dest;
+        return;
+    }
+    auto &dev = n->second;
+    if (dev->current_tx)
+    {
+        dev->current_tx->cb(res);
+        dev->current_tx.reset();
+    }
+    else
+    {
+        L_Err << "lost state";
+    }
 }
 
 void ncube::_run_job(job j, job_callback cb)
@@ -1109,7 +1169,9 @@ void ncube::_run_job(job j, job_callback cb)
                 if (!add_send_job(std::move(senddata), cb))
                     cb(false);
                 else
+                {
                     L_Info << "tx initiated";
+                }
 
                 // _wakeup(std::get<rfaddr>(j.second));
             }

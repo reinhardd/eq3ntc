@@ -158,6 +158,7 @@ public:
     void start_job(job j, job_callback cb);
 
 
+
 private:
     void start();
     void sync_setup_port();
@@ -211,7 +212,8 @@ private:
 
     bool get_room_id(rfaddr addr, uint8_t &rid) const;
     bool add_send_job(tx_data &&txd, job_callback cb);
-    bool start_send(const tx_data &txd);
+    bool start_send(const tx_data &txd, uint8_t counter);
+    void send_job_response(rfaddr addr, uint8_t counter, bool res);
 
     uint8_t get_inc_counter(rfaddr addr);
 
