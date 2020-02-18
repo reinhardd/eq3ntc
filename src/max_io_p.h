@@ -108,7 +108,8 @@ struct dev_tx_status
     {
         rxto.cancel();
     }
-    std::deque<tx_data> waiting_for_send;
+    // std::deque<tx_data> waiting_for_send;
+    std::deque<tx_unit> waiting_for_send;
 
     std::optional<tx_unit> current_tx;
 };
