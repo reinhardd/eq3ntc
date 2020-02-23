@@ -549,23 +549,11 @@ void ncube::process_data(std::string &&datain)
         return;
     }
 
-    // uint8_t possibly_rssi = uvalue(datain.end()-2, 2);
-    // L_Info << "got packet sz " << datain.size() << " : " << datain;
     auto get_input_info = [&datain]() {
         std::ostringstream xs;
         xs << "data[" << datain.size() << ": " << datain << "]";
         return xs.str();
     };
-
-    // 12345678901234567890123456789012345
-    // Z0F 00  04   60  1AF6DD 000000 00 18 00 0C 00 CD F8
-    //     cnt flag mt  src    dest   payload           rssi
-    // 0f -> 36
-    // 0f * 2 => 30 +
-
-    // datain.erase(datain.size()-2);
-
-
 
     const char *pData = datain.c_str();
     unsigned len = uvalue(pData+1, 2);
@@ -625,9 +613,29 @@ void ncube::process_data(std::string &&datain)
                        << " desired:" << float(desired/2.0)
                        << " flags:" << devflags_to_string(flags)
                        << aux.str()
-                       << "}";
+                       << "}";                
 
                 update_thermostat_mode_valve_desired(src, static_cast<opmode>(flags & 3), valve, float(desired/2.0));
+
+                auto it = _p->tx_states.find(src);
+                if (it != _p->tx_states.end())
+                {
+                    L_Info << "found local job target";
+                    if (it->second->current_tx)
+                    {
+                        L_Info << "found local job target waiting";
+                        it->second->rxto.cancel_one();
+                        it->second->current_tx->cb(true);
+                        if (it->second->waiting_for_send.size())
+                        {
+                            it->second->current_tx = it->second->waiting_for_send.front();
+                            uint8_t counter = get_inc_counter(src);
+                            it->second->waiting_on = counter;
+                            start_send(it->second->current_tx->txd, counter);
+                            start_rx_to(src, counter);
+                        }
+                    }
+                }
 
                 // check if we have a pending transmit waiting
             }
@@ -1057,6 +1065,12 @@ void ncube::start_job(job j, job_callback cb)
     _p->ios->post(std::bind(&ncube::_run_job, this, j, cb));
 }
 
+void ncube::wakeup(rfaddr addr, job_callback cb)
+{
+    start_job(job_data(job_type::test_wakeup, addr), cb);
+}
+
+
 uint8_t ncube::get_inc_counter(rfaddr addr)
 {
     std::map<rfaddr, thermostat_state>::iterator it;
@@ -1087,6 +1101,23 @@ bool ncube::start_send(const tx_data &txd, uint8_t counter)
     return true;
 }
 
+void ncube::start_rx_to(rfaddr addr, uint8_t counter)
+{
+    auto &dev = _p->tx_states[addr];
+    dev->rxto.expires_from_now(std::chrono::seconds(3));
+
+    dev->rxto.async_wait([this, addr, counter](const boost::system::error_code &e){
+        if (e == boost::system::errc::success)
+        {
+            L_Err << "rxto expired for " << std::hex << addr;
+            send_job_response(addr, counter, false);
+        }
+        else
+            L_Info << "rxto canceled for " << std::hex << addr;
+    });
+
+}
+
 bool ncube::add_send_job(tx_data &&txd, job_callback cb)
 {
     rfaddr dest = txd.dest;
@@ -1097,13 +1128,13 @@ bool ncube::add_send_job(tx_data &&txd, job_callback cb)
         _p->tx_states[dest] = std::make_unique<dev_tx_status>(_p->ios.get());
     }
 
-
     auto &dev = _p->tx_states[dest];
 
     if (dev->current_tx)
     {
         L_Trace << "add to queue";
         dev->waiting_for_send.push_back(tx_unit(txd, cb));
+        return true;
     }
     else
     {
@@ -1117,12 +1148,17 @@ bool ncube::add_send_job(tx_data &&txd, job_callback cb)
         dev->current_tx = tx_unit(txd, cb);
         tx_unit &txu = *(dev->current_tx);
         start_send(txu.txd, dev->waiting_on);
+        start_rx_to(dest, counter);
+#if 0
         dev->rxto.expires_from_now(std::chrono::seconds(3));
 
         dev->rxto.async_wait([this, dest, counter](const boost::system::error_code &e){
             L_Info << "rxto expired for " << std::hex << dest << " err: " << e.message();
-            send_job_response(dest, counter, !e);
+            if (e == boost::system::errc::success)
+                send_job_response(dest, counter, false);
         });
+#endif
+        return true;
 
     }
     return false;
@@ -1141,8 +1177,41 @@ void ncube::send_job_response(rfaddr dest, uint8_t counter, bool res)
     auto &dev = n->second;
     if (dev->current_tx)
     {
-        dev->current_tx->cb(res);
-        dev->current_tx.reset();
+        if (res)
+        {
+            L_Info << "successfully ended job for " << std::hex << dest;
+            dev->rxto.cancel_one();
+            dev->current_tx->cb(res);
+
+            if (dev->waiting_for_send.size())
+            {
+                L_Info << "start next tx from queue";
+                dev->current_tx = dev->waiting_for_send.front();
+                dev->waiting_for_send.pop_front();
+                uint8_t counter = get_inc_counter(n->first);
+                start_send(dev->current_tx->txd, counter);
+            }
+            else
+                dev->current_tx.reset();
+        }
+        else
+        {
+            L_Err << "job failed for " << std::hex << dest;
+            dev->current_tx->attempt++;
+            if (dev->current_tx->attempt < dev->current_tx->maxtries)
+            {
+                L_Err << "start retry " << dev->current_tx->attempt
+                      <<  " of " << dev->current_tx->maxtries << dest;
+                uint8_t counter = get_inc_counter(n->first);
+                start_send(dev->current_tx->txd, counter);
+            }
+            else
+            {
+                dev->current_tx->cb(false);
+                dev->current_tx.reset();
+            }
+
+        }
     }
     else
     {
@@ -1178,4 +1247,43 @@ void ncube::_run_job(job j, job_callback cb)
             break;
     }
 }
+
+rfaddr ncube::get_addr(const std::string &descr)
+{
+    std::string room;
+    std::string dev;
+    auto fpos = descr.find(':');
+    if (fpos != std::string::npos)
+    {
+        room = descr.substr(0, fpos);
+        dev = descr.substr(fpos+1);
+    }
+    else
+        room = descr;
+
+    for (const auto &roomconf: _p->cdata)
+    {
+        if (roomconf.second.name == room)
+        {
+            if (!dev.empty())
+            {
+                for (const auto &tstat: roomconf.second.thermostats)
+                {
+                    if (tstat.second == dev)
+                        return tstat.first;
+                }
+            }
+            else
+            {
+                if (roomconf.second.wallthermostat)
+                    return roomconf.second.wallthermostat;
+                if (roomconf.second.thermostats.size() != 1)
+                    return 0;   // invalid
+                return roomconf.second.thermostats.begin()->first;
+            }
+        }
+    }
+    return 0;
+}
+
 }

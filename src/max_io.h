@@ -137,8 +137,6 @@ public: // types
     using job = std::pair<job_type, job_parameter>;
 public:
 
-//     using callback = std::function< void ( std::shared_ptr<system_state> ) >;
-
     ncube(std::string port,
           const config &config,
           callback f);
@@ -150,14 +148,26 @@ public:
 
     ~ncube();
 
-    void wakeup(rfaddr addr, job_callback cb)
-    {
-        start_job(job_data(job_type::test_wakeup, addr), cb);
-    }
+    /**
+     * @brief queries rfaddr by name
+     * @param descr
+     * @retval 0 if not find otherwise returns device address
+     *
+     * examples:
+     *     get_addr("living room:radioator 1")
+     *          searches for a thermostat within room "living room"
+     *     get_addr("floor")
+     *          search for the room floor and returns
+     *          A: returns 0 if there is no room "floor"
+     *          B: returns the address of the wallthermostat if there is one
+     *          C: returns the address of the one and only thermostat in that room
+     *          D: return 0
+     *
+     *
+     */
+    rfaddr get_addr(const std::string &descr);
 
-    void start_job(job j, job_callback cb);
-
-
+    void wakeup(rfaddr addr, job_callback cb);
 
 private:
     void start();
@@ -168,7 +178,9 @@ private:
     void start_packet_read();
     std::string get_received();
 
+    void start_job(job j, job_callback cb);
     void _run_job(job j, job_callback cb);
+    void start_rx_to(rfaddr addr, uint8_t counter);
     void _wakeup(rfaddr addr);
 
     void setup_workdata();
