@@ -74,15 +74,25 @@ int main(int argc, char *argv[])
         {
             input.erase(0,3);
             boost::trim(input);
-            std::istringstream ix(input);
-            uint32_t rfaddr = 0;
+            max_io::rfaddr rfaddr = 0;
+#if 1
+            rfaddr = mycube.get_addr(input);
+#else
+            std::istringstream ix(input);            
             ix >> std::hex >> rfaddr;
-            std::cout << "addr " << std::hex << rfaddr << std::endl;
-            using job_type = max_io::ncube::job_type;
-            using job_data = max_io::ncube::job_data;
-            mycube.start_job(job_data(job_type::test_wakeup, rfaddr), [](bool res){
-                L_Info << "wup job finished " << std::boolalpha << res;
-            });
+#endif
+            if (rfaddr == 0)
+                std::cerr << "invalid device name " << input << std::endl;
+            else
+            {
+                std::cout << "main: addr " << std::hex << rfaddr << std::endl;
+                using job_type = max_io::ncube::job_type;
+                using job_data = max_io::ncube::job_data;
+                mycube.start_job(job_data(job_type::test_wakeup, rfaddr), [rfaddr](bool res){
+                    L_Info << "main: wup job finished for " << std::hex << rfaddr
+                           << " res: " << std::boolalpha << res;
+                });
+            }
         }
 
     }
